@@ -10,6 +10,8 @@
 - **Rate Limit Handling:** Adapts to GitHub's API rate limits to prevent interruptions.
 - **Custom Workspace Support:** Store logs in defined workspaces for different search contexts.
 
+** you will need a Github API token **
+
 ## Usage
 ```bash
 python3 gist_hunter.py [search terms...] [output_file] [options]
