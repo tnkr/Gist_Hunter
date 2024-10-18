@@ -1,6 +1,6 @@
 # Gist Hunter
 
-`Gist Hunter` is a powerful and efficient tool to search through public GitHub Gists using **fuzzy matching**. It helps you quickly find Gists containing specific terms in their metadata (e.g., description, filenames) or content. With incremental search capabilities, `Gist Hunter` avoids redundant searches by tracking already processed Gists.
+`Gist Hunter` is a tool to search through public GitHub Gists using **fuzzy matching**. It helps you quickly find Gists containing specific terms in their metadata (e.g., description, filenames) or content. With incremental search capabilities, `Gist Hunter` avoids redundant searches by tracking already processed Gists.
 
 ## Features
 
