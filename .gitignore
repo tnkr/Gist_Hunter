@@ -1,6 +1,6 @@
 # Ignore environment and virtual environment files
 .env
-.venv/
+.venv
 workspace.log
 # Byte-compiled Python files
 __pycache__/
