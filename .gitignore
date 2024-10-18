@@ -1,10 +1,11 @@
 # Ignore environment and virtual environment files
 .env
 .venv/
-
+workspace.log
 # Byte-compiled Python files
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 # System-specific files
 .DS_Store
