@@ -1,12 +1,10 @@
 import sys
 import os
-import time
+import sqlite3
 import requests
 from bs4 import BeautifulSoup
-from rapidfuzz import process, fuzz
+from rapidfuzz import fuzz
 from dotenv import load_dotenv
-import itertools
-import threading
 import argparse
 
 # Load environment variables from .env
@@ -14,60 +12,129 @@ load_dotenv()
 
 CONFIG_FILE = ".workspace_config"
 
-def get_github_token():
-    """Retrieve the GitHub token from the environment."""
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        print("Error: GITHUB_TOKEN not found. Make sure it is set in the .env file.")
-        exit(1)
-    return token
-
-def load_workspace():
-    """Load the saved workspace path from the config file."""
+def get_db_file():
+    """Retrieve the current workspace database file from the config file."""
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
-            return f.read().strip()
-    return "workspace.log"
-
-def save_workspace(workspace):
-    """Save the new workspace path to the config file."""
-    with open(CONFIG_FILE, "w") as f:
-        f.write(workspace)
-
-def read_workspace_log(log_file):
-    """Read the workspace log and return a set of processed Gist IDs."""
-    if not os.path.exists(log_file):
-        return set()
-    with open(log_file, "r") as f:
-        return set(line.strip() for line in f)
-
-def update_workspace_log(log_file, gist_id):
-    """Append a Gist ID to the workspace log."""
-    with open(log_file, "a") as f:
-        f.write(gist_id + "\n")
-
-def check_rate_limit():
-    """Check the current rate limit for the GitHub API."""
-    token = get_github_token()
-    headers = {"Authorization": f"token {token}"}
-    response = requests.get("https://api.github.com/rate_limit", headers=headers, timeout=10)
-
-    if response.status_code == 200:
-        rate_limit_data = response.json()
-        remaining = rate_limit_data['rate']['remaining']
-        reset_time = rate_limit_data['rate']['reset']
-
-        current_time = time.time()
-        seconds_until_reset = reset_time - current_time
-
-        print(f"Remaining Requests: {remaining}")
-        print(f"Seconds Until Reset: {seconds_until_reset:.2f}")
-
-        return remaining, seconds_until_reset
+            db_file = f.read().strip() + ".db"
+            if not os.path.exists(db_file):
+                print("Workspace database not found. Please define a new workspace with '--define-workspace <name>'.")
+                sys.exit(1)
+            return db_file
     else:
-        print(f"Failed to fetch rate limit. Status Code: {response.status_code}")
-        print(response.json())
-        exit(1)
+        print("No workspace defined. Please use '--define-workspace <name>' to create one.")
+        sys.exit(1)
+
+def init_db(db_file):
+    """Initialize the SQLite database."""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS gists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def set_workspace(workspace_name):
+    """Set a new workspace and initialize its database."""
+    with open(CONFIG_FILE, "w") as f:
+        f.write(workspace_name)
+    print(f"Workspace '{workspace_name}' has been defined.")
+    init_db(workspace_name + ".db")
+
+def is_valid_gist(gist):
+    """Check if the Gist has meaningful content in the metadata."""
+    files = gist.get("files", {})
+    for file_info in files.values():
+        if file_info.get("size", 0) > 0:
+            return True  # At least one file with content
+    return False  # No meaningful content found
+
+def fetch_gist_content(gist_url):
+    """Fetch and validate the content of a Gist."""
+    try:
+        response = requests.get(gist_url, timeout=10)
+        if response.status_code != 200:
+            if verbose:
+                print(f"Failed to fetch content from {gist_url}. Status Code: {response.status_code}")
+            return None
+
+        soup = BeautifulSoup(response.content, "html.parser")
+        files = soup.select(".file .highlight pre")
+
+        # Suppress output if no content is found
+        if not files:
+            return None
+
+        content = "\n".join(file.get_text() for file in files)
+        return content if content.strip() else None  # Ensure content is not just whitespace
+
+    except requests.Timeout:
+        if verbose:
+            print(f"Request to {gist_url} timed out.")
+        return None
+
+def save_to_db(gists, db_file):
+    """Save discovered Gists to the database."""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    for gist in gists:
+        try:
+            cursor.execute("INSERT INTO gists (url) VALUES (?)", (gist["html_url"],))
+        except sqlite3.IntegrityError:
+            pass  # Ignore duplicates
+    conn.commit()
+    conn.close()
+
+def list_discovered_gists(db_file):
+    """List all discovered Gists from the database."""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("SELECT id, url FROM gists ORDER BY id")
+        gists = cursor.fetchall()
+    except sqlite3.OperationalError:
+        print("No valid 'gists' table found. Please define a new workspace.")
+        sys.exit(1)
+    finally:
+        conn.close()
+
+    if gists:
+        print("Discovered Gists:")
+        for gist_id, url in gists:
+            print(f"{gist_id} {url}")
+    else:
+        print("No discovered Gists found.")
+
+def fetch_gist_by_id(gist_id, db_file):
+    """Fetch a Gist from the database using its ID."""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT url FROM gists WHERE id = ?", (gist_id,))
+        row = cursor.fetchone()
+    except sqlite3.OperationalError:
+        print("No valid 'gists' table found. Please define a new workspace.")
+        sys.exit(1)
+    finally:
+        conn.close()
+
+    if row:
+        url = row[0]
+        print(f"Fetching Gist {url}...")
+        content = fetch_gist_content(url)
+        if content:
+            print("\nGist Content:\n" + "-" * 40)
+            print(content)
+            print("-" * 40 + "\n")
+        else:
+            print("No content available for this Gist.")
+    else:
+        print(f"No Gist found with ID {gist_id}.")
 
 def match_in_metadata(gist, search_terms):
     """Check if any search term matches the Gist metadata."""
@@ -80,131 +147,71 @@ def match_in_metadata(gist, search_terms):
             return True
     return False
 
-def fetch_matching_gists(search_terms, max_requests, verbose, log_file):
-    """Fetch only matching Gists based on metadata."""
-    token = get_github_token()
+def scan_public_gists(search_terms, max_requests, verbose, db_file):
+    """Scan through public Gists for potential matches."""
+    token = os.getenv("GITHUB_TOKEN")
     headers = {"Authorization": f"token {token}"}
     url = "https://api.github.com/gists/public"
-    all_results = {}
-    processed_gists = read_workspace_log(log_file)
+    matching_gists = []
+    total_scanned = 0
+
+    print("Scanning public Gists...")
 
     for _ in range(max_requests):
         response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code == 200:
             gists = response.json()
+            total_scanned += len(gists)
 
             for gist in gists:
-                gist_id = gist["id"]
-                if gist_id in processed_gists:
-                    if verbose:
-                        print(f"Skipping already processed Gist: {gist_id}")
-                    continue
-
-                if match_in_metadata(gist, search_terms):
-                    gist_url = gist["html_url"]
-                    if verbose:
-                        print(f"Fetching matching Gist: {gist_url}")
-
-                    content = get_gist_content(gist_url, verbose)
-                    matches = fuzzy_search_in_content(content, search_terms)
-
-                    if matches:
-                        all_results[gist_url] = matches
-
-                # Update the log with the processed Gist ID
-                update_workspace_log(log_file, gist_id)
+                if is_valid_gist(gist) and match_in_metadata(gist, search_terms):
+                    content = fetch_gist_content(gist["html_url"])
+                    if content:
+                        matching_gists.append(gist)
+                        if verbose:
+                            print(f"Found matching Gist with content: {gist['html_url']}")
 
         url = response.links.get("next", {}).get("url")
         if not url:
             break
 
-    return all_results
+    print(f"Scanned {total_scanned} Gists.")
+    print(f"Found {len(matching_gists)} matching Gists with valid content.")
 
-def get_gist_content(gist_url, verbose):
-    """Fetch and scrape the content of a matching Gist."""
-    try:
-        response = requests.get(gist_url, timeout=10)
-        if response.status_code != 200:
-            if verbose:
-                print(f"Failed to fetch content from {gist_url}. Status Code: {response.status_code}")
-            return ""
-    except requests.Timeout:
-        print(f"Request to {gist_url} timed out.")
-        return ""
-
-    soup = BeautifulSoup(response.content, "html.parser")
-    files = soup.select(".file .highlight pre")
-    return "\n".join(file.get_text() for file in files)
-
-def fuzzy_search_in_content(content, search_terms):
-    """Perform fuzzy search for multiple terms."""
-    lines = content.splitlines()
-    results = {}
-    for term in search_terms:
-        matches = process.extract(term, lines, scorer=fuzz.partial_ratio, score_cutoff=50)
-        if matches:
-            results[term] = [line for line, score, _ in matches]
-    return results
-
-def spinner():
-    """Display a spinning animation while the script runs."""
-    for frame in itertools.cycle(['|', '/', '-', '\\']):
-        print(f"\rRunning... {frame}", end='', flush=True)
-        time.sleep(0.1)
-
-def calculate_safe_interval(remaining, seconds_until_reset):
-    """Calculate the minimum interval between requests to stay within the rate limit."""
-    if remaining == 0:
-        print("No remaining requests available. Please wait for the reset period.")
-        exit(1)
-
-    # Calculate the interval to evenly distribute requests
-    interval = seconds_until_reset / remaining
-    return max(interval, 1)  # Ensure the interval is at least 1 second
-
-def search_gists(search_terms, output_file, max_requests, verbose, log_file):
-    """Search Gists based on metadata and fetch matching ones."""
-    remaining, seconds_until_reset = check_rate_limit()
-    if max_requests > remaining:
-        print(f"Error: The script requires {max_requests} requests, but only {remaining} are available.")
-        exit(1)
-
-    interval = calculate_safe_interval(remaining, seconds_until_reset)
-    total_time = max_requests * interval
-    print(f"Estimated time to complete: {total_time:.2f} seconds")
-
-    if not verbose:
-        spinner_thread = threading.Thread(target=spinner, daemon=True)
-        spinner_thread.start()
-
-    all_results = fetch_matching_gists(search_terms, max_requests, verbose, log_file)
-
-    print("\nSearch complete. Saving results...")
-    if all_results:
-        with open(output_file, "w") as f:
-            f.write(str(all_results))
-        print(f"Results saved to {output_file}")
+    if matching_gists:
+        print("Saving to workspace...")
+        save_to_db(matching_gists, db_file)
     else:
-        print("No matches found.")
+        print("No matching Gists with valid content found.")
+
+def main(search_terms, max_requests, verbose):
+    """Main function to execute the Gist search."""
+    db_file = get_db_file()
+    print("Scanning public Gists...")
+    scan_public_gists(search_terms, max_requests, verbose, db_file)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Search public GitHub Gists using metadata and fuzzy matching.")
-    parser.add_argument("search_terms", nargs="+", help="Search terms to look for in Gists.")
-    parser.add_argument("output_file", help="Output file to save the results.")
-    parser.add_argument("--max-requests", type=int, default=10, help="Maximum number of Gists to search (default: 10).")
+    parser = argparse.ArgumentParser(description="Manage and search public GitHub Gists with custom workspaces.")
+    parser.add_argument("--define-workspace", help="Create a new workspace with the given name.")
+    parser.add_argument("--list-discovered", action="store_true", help="List discovered Gists from the current workspace.")
+    parser.add_argument("--fetch", type=int, help="Fetch the Gist by its ID from the current workspace.")
+    parser.add_argument("--max-requests", type=int, default=10, help="Maximum number of requests (default: 10).")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output.")
-    parser.add_argument("--workspace", help="Set or override the workspace log file path.")
+    parser.add_argument("search_terms", nargs="*", help="Search terms to look for in Gists.")
 
     args = parser.parse_args()
 
-    workspace = args.workspace or load_workspace()
-    if args.workspace:
-        save_workspace(args.workspace)
-
-    search_terms = args.search_terms[:-1]
-    output_file = args.search_terms[-1]
-    max_requests = args.max_requests
-    verbose = args.verbose
-
-    search_gists(search_terms, output_file, max_requests, verbose, workspace)
+    if args.define_workspace:
+        set_workspace(args.define_workspace)
+    elif args.list_discovered:
+        db_file = get_db_file()
+        list_discovered_gists(db_file)
+    elif args.fetch is not None:
+        db_file = get_db_file()
+        fetch_gist_by_id(args.fetch, db_file)
+    elif args.search_terms:
+        main(args.search_terms, args.max_requests, args.verbose)
+    else:
+        print("No valid action provided. Use '--define-workspace' or '--list-discovered'.")
+        sys.exit(1)
