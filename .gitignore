@@ -2,6 +2,9 @@
 .env
 .venv
 workspace.log
+*.db
+.workspace_config
+
 # Byte-compiled Python files
 __pycache__/
 *.py[cod]
